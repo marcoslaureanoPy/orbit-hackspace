@@ -1,0 +1,5 @@
+# Add this block to your Caddyfile (do not replace the whole file).
+# If port 443 is already in use on the host, listen on another HTTPS port instead.
+your-domain.example {
+	reverse_proxy 127.0.0.1:3010
+}

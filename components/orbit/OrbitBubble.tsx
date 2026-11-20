@@ -1,0 +1,478 @@
+"use client";
+
+import {
+  useCallback,
+  useRef,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import { clamp } from "./physics";
+import {
+  useOrbitStore,
+  type OrbitBubbleState,
+} from "./useOrbitStore";
+
+type Props = {
+  bubble: OrbitBubbleState;
+};
+
+const STATUS_LABEL: Record<OrbitBubbleState["status"], string> = {
+  idle: "Idle",
+  running: "Running",
+  done: "Done",
+};
+
+function SizeControls({
+  onShrink,
+  onGrow,
+  compact,
+}: {
+  onShrink: () => void;
+  onGrow: () => void;
+  compact?: boolean;
+}) {
+  const btn =
+    compact
+      ? "flex h-5 w-5 items-center justify-center rounded-full border border-line-soft text-[10px] text-fg-mute hover:border-accent/40 hover:text-accent"
+      : "flex h-6 w-6 items-center justify-center rounded border border-line-soft text-[11px] text-fg-mute hover:border-accent/40 hover:text-accent";
+  return (
+    <div className="flex items-center gap-0.5" title="Resize bubble">
+      <button
+        type="button"
+        onClick={onShrink}
+        className={btn}
+        aria-label="Reduce size"
+      >
+        −
+      </button>
+      <button
+        type="button"
+        onClick={onGrow}
+        className={btn}
+        aria-label="Expand size"
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
+function ResizeHandle({
+  onResizeStart,
+  round,
+}: {
+  onResizeStart: (e: ReactPointerEvent) => void;
+  round?: boolean;
+}) {
+  return (
+    <div
+      className={`absolute z-10 cursor-nwse-resize touch-none ${
+        round
+          ? "bottom-2 right-[18%] h-4 w-4"
+          : "bottom-1 right-1 h-4 w-4"
+      }`}
+      onPointerDown={onResizeStart}
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label="Resize bubble"
+      title="Drag to resize"
+    >
+      <svg
+        viewBox="0 0 16 16"
+        className="h-full w-full text-fg-mute opacity-70 hover:text-accent hover:opacity-100"
+        aria-hidden
+      >
+        <path
+          d="M10 14h4v-4M6 14h2M14 6v2M9 9l5 5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+        />
+      </svg>
+    </div>
+  );
+}
+
+export function OrbitBubble({ bubble }: Props) {
+  const {
+    updateBubble,
+    setBubbleShape,
+    resizeBubble,
+    nudgeBubbleSize,
+    playBubble,
+    pullToCore,
+    dismissBubble,
+    viewport,
+    saveToCredentials,
+  } = useOrbitStore();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<{
+    ox: number;
+    oy: number;
+    sx: number;
+    sy: number;
+  } | null>(null);
+  const resizing = useRef<{
+    ow: number;
+    oh: number;
+    sx: number;
+    sy: number;
+  } | null>(null);
+
+  const shape = bubble.shape ?? "card";
+  const size = { w: bubble.w, h: bubble.h };
+
+  const onPointerDown = useCallback(
+    (e: ReactPointerEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("textarea, input, button, a, [role='separator']"))
+        return;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      drag.current = {
+        ox: bubble.x,
+        oy: bubble.y,
+        sx: e.clientX,
+        sy: e.clientY,
+      };
+    },
+    [bubble.x, bubble.y],
+  );
+
+  const onPointerMove = useCallback(
+    (e: ReactPointerEvent) => {
+      if (resizing.current) {
+        const dx = e.clientX - resizing.current.sx;
+        const dy = e.clientY - resizing.current.sy;
+        if (shape === "round") {
+          const delta = Math.round((dx + dy) / 2);
+          resizeBubble(
+            bubble.id,
+            resizing.current.ow + delta,
+            resizing.current.oh + delta,
+          );
+        } else {
+          resizeBubble(
+            bubble.id,
+            resizing.current.ow + dx,
+            resizing.current.oh + dy,
+          );
+        }
+        return;
+      }
+      if (!drag.current) return;
+      const dx = e.clientX - drag.current.sx;
+      const dy = e.clientY - drag.current.sy;
+      const maxX = Math.max(0, viewport.w - size.w);
+      const maxY = Math.max(0, viewport.h - size.h);
+      updateBubble(bubble.id, {
+        x: clamp(drag.current.ox + dx, 0, maxX),
+        y: clamp(drag.current.oy + dy, 0, maxY),
+      });
+    },
+    [
+      bubble.id,
+      resizeBubble,
+      shape,
+      size.h,
+      size.w,
+      updateBubble,
+      viewport.h,
+      viewport.w,
+    ],
+  );
+
+  const onPointerUp = useCallback((e: ReactPointerEvent) => {
+    if (drag.current || resizing.current) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
+    }
+    drag.current = null;
+    resizing.current = null;
+  }, []);
+
+  const onResizeStart = useCallback(
+    (e: ReactPointerEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      rootRef.current?.setPointerCapture(e.pointerId);
+      resizing.current = {
+        ow: bubble.w,
+        oh: bubble.h,
+        sx: e.clientX,
+        sy: e.clientY,
+      };
+    },
+    [bubble.h, bubble.w],
+  );
+
+  const statusColor =
+    bubble.status === "running"
+      ? "text-warn"
+      : bubble.status === "done"
+        ? "text-accent"
+        : "text-fg-mute";
+
+  const toggleShape = () => {
+    setBubbleShape(bubble.id, shape === "round" ? "card" : "round");
+  };
+
+  const truncatedSource =
+    bubble.sourceContent.length > 72
+      ? `${bubble.sourceContent.slice(0, 72).trim()}…`
+      : bubble.sourceContent;
+
+  if (shape === "round") {
+    return (
+      <div
+        ref={rootRef}
+        className="orbit-bubble orbit-bubble-round absolute z-30 flex flex-col overflow-hidden border border-[rgba(61,207,176,0.4)] bg-[rgba(8,10,12,0.94)] shadow-[0_0_40px_rgba(61,207,176,0.16),0_12px_40px_rgba(0,0,0,0.5)] backdrop-blur-md"
+        style={{
+          left: bubble.x,
+          top: bubble.y,
+          width: size.w,
+          height: size.h,
+          borderRadius: "50%",
+          touchAction: "none",
+        }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+      >
+        {/* Safe inner circle padding from curved edge */}
+        <div className="orbit-bubble-handle flex cursor-grab flex-col items-center px-[14%] pt-[12%] pb-1 active:cursor-grabbing">
+          <div className="flex w-full items-start justify-between gap-1">
+            <button
+              type="button"
+              onClick={toggleShape}
+              className="shrink-0 rounded-full border border-line-soft px-1.5 py-0.5 text-[8px] uppercase tracking-wider text-fg-mute hover:border-accent/40 hover:text-accent"
+              title="Switch to card"
+              aria-label="Switch to card shape"
+            >
+              Card
+            </button>
+            <SizeControls
+              compact
+              onShrink={() => nudgeBubbleSize(bubble.id, -24)}
+              onGrow={() => nudgeBubbleSize(bubble.id, 24)}
+            />
+            <button
+              type="button"
+              onClick={() => dismissBubble(bubble.id)}
+              className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] text-fg-mute hover:bg-line-soft hover:text-fg-dim"
+              aria-label="Archive bubble"
+              title="Archive"
+            >
+              ✕
+            </button>
+          </div>
+          <input
+            value={bubble.title}
+            onChange={(e) => updateBubble(bubble.id, { title: e.target.value })}
+            className="mt-1 w-full bg-transparent text-center text-[11px] font-medium text-fg outline-none placeholder:text-fg-mute"
+            aria-label="Bubble title"
+          />
+          <span
+            className={`font-mono text-[8px] uppercase tracking-wider ${statusColor}`}
+          >
+            {STATUS_LABEL[bubble.status]}
+            {bubble.status === "running" && (
+              <span className="ml-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-warn align-middle" />
+            )}
+          </span>
+        </div>
+
+        <div className="orbit-bubble-round-body mx-[12%] mb-1 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-1">
+          <p className="text-center font-mono text-[9px] leading-snug text-fg-mute">
+            {truncatedSource}
+          </p>
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-md bg-bg/40 px-1.5 py-1">
+            <p className="whitespace-pre-wrap font-mono text-[9px] leading-relaxed text-fg-dim">
+              {bubble.sourceContent}
+            </p>
+          </div>
+          <textarea
+            value={bubble.notes}
+            onChange={(e) => updateBubble(bubble.id, { notes: e.target.value })}
+            placeholder="Notes…"
+            rows={2}
+            className="w-full shrink-0 resize-none rounded-md border border-line-soft bg-bg/50 px-2 py-1 text-[10px] text-fg-dim placeholder:text-fg-mute focus:border-accent/30 focus:outline-none"
+            aria-label="Bubble notes"
+          />
+          {bubble.subagentLog.length > 0 && (
+            <ul className="max-h-12 shrink-0 space-y-0.5 overflow-y-auto rounded-md border border-line-soft bg-bg/40 px-1.5 py-1 font-mono text-[8px] leading-relaxed text-fg-mute">
+              {bubble.subagentLog.map((line, i) => (
+                <li key={`${i}-${line.slice(0, 12)}`}>{line}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="flex shrink-0 flex-wrap justify-center gap-1 px-[14%] pb-[11%] pt-1">
+          <button
+            type="button"
+            disabled={bubble.status === "running"}
+            onClick={() => playBubble(bubble.id)}
+            className="flex items-center justify-center gap-0.5 rounded-full bg-accent/90 px-2.5 py-1 text-[10px] font-medium text-[#04110e] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <span aria-hidden>▶</span>
+            Play
+          </button>
+          <button
+            type="button"
+            onClick={() => pullToCore(bubble.id)}
+            className="flex items-center justify-center gap-0.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-[10px] font-medium text-accent transition-colors hover:bg-accent/20"
+          >
+            <span aria-hidden>↙</span>
+            Pull
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              saveToCredentials(
+                [bubble.title, bubble.sourceContent, bubble.notes]
+                  .filter(Boolean)
+                  .join("\n"),
+              )
+            }
+            className="flex items-center justify-center rounded-full border border-line-soft px-2 py-1 text-[9px] font-medium text-fg-mute hover:border-accent/40 hover:text-accent"
+            title="Save to credentials"
+          >
+            Creds
+          </button>
+        </div>
+
+        <ResizeHandle round onResizeStart={onResizeStart} />
+      </div>
+    );
+  }
+
+  // Card layout — true rectangle (rounded-xl only, NEVER border-radius 50%)
+  return (
+    <div
+      ref={rootRef}
+      className="orbit-bubble orbit-bubble-card absolute z-30 flex flex-col overflow-hidden rounded-xl border border-[rgba(61,207,176,0.35)] bg-[rgba(8,10,12,0.94)] shadow-[0_0_40px_rgba(61,207,176,0.12),0_12px_40px_rgba(0,0,0,0.5)] backdrop-blur-md"
+      style={{
+        left: bubble.x,
+        top: bubble.y,
+        width: size.w,
+        height: size.h,
+        borderRadius: 12,
+        touchAction: "none",
+      }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      data-shape="card"
+    >
+      <div className="orbit-bubble-handle flex shrink-0 cursor-grab items-start gap-2 border-b border-line px-3 py-2 active:cursor-grabbing">
+        <div className="min-w-0 flex-1">
+          <input
+            value={bubble.title}
+            onChange={(e) => updateBubble(bubble.id, { title: e.target.value })}
+            className="w-full bg-transparent text-[12px] font-medium text-fg outline-none placeholder:text-fg-mute"
+            aria-label="Bubble title"
+          />
+          <div className="mt-0.5 flex items-center gap-2">
+            <span
+              className={`font-mono text-[9px] uppercase tracking-wider ${statusColor}`}
+            >
+              {STATUS_LABEL[bubble.status]}
+              {bubble.status === "running" && (
+                <span className="ml-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-warn align-middle" />
+              )}
+            </span>
+            <span className="font-mono text-[8px] uppercase tracking-wider text-accent/70">
+              Card
+            </span>
+          </div>
+        </div>
+        <SizeControls
+          onShrink={() => nudgeBubbleSize(bubble.id, -28)}
+          onGrow={() => nudgeBubbleSize(bubble.id, 28)}
+        />
+        <button
+          type="button"
+          onClick={toggleShape}
+          className="shrink-0 rounded border border-line-soft px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-fg-mute hover:border-accent/40 hover:text-accent"
+          title="Switch to round"
+          aria-label="Switch to round shape"
+        >
+          Round
+        </button>
+        <button
+          type="button"
+          onClick={() => dismissBubble(bubble.id)}
+          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-fg-mute hover:bg-line-soft hover:text-fg-dim"
+          aria-label="Archive bubble"
+          title="Archive"
+        >
+          ✕
+        </button>
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 py-2">
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-line-soft/60 bg-bg/40 px-2 py-1.5">
+          <p className="whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-fg-dim">
+            {bubble.sourceContent}
+          </p>
+        </div>
+        <textarea
+          value={bubble.notes}
+          onChange={(e) => updateBubble(bubble.id, { notes: e.target.value })}
+          placeholder="Notes / comments…"
+          rows={2}
+          className="w-full shrink-0 resize-none rounded-md border border-line-soft bg-bg/50 px-2 py-1.5 text-[11px] text-fg-dim placeholder:text-fg-mute focus:border-accent/30 focus:outline-none"
+          aria-label="Bubble notes"
+        />
+        {bubble.subagentLog.length > 0 && (
+          <ul className="max-h-24 shrink-0 space-y-0.5 overflow-y-auto rounded-md border border-line-soft bg-bg/40 px-2 py-1.5 font-mono text-[9px] leading-relaxed text-fg-mute">
+            {bubble.subagentLog.map((line, i) => (
+              <li key={`${i}-${line.slice(0, 12)}`}>{line}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="flex shrink-0 gap-1.5 border-t border-line px-2 py-2 pr-6">
+        <button
+          type="button"
+          disabled={bubble.status === "running"}
+          onClick={() => playBubble(bubble.id)}
+          className="flex flex-1 items-center justify-center gap-1 rounded-md bg-accent/90 px-2 py-1.5 text-[11px] font-medium text-[#04110e] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <span aria-hidden>▶</span>
+          Play
+        </button>
+        <button
+          type="button"
+          onClick={() => pullToCore(bubble.id)}
+          className="flex flex-1 items-center justify-center gap-1 rounded-md border border-accent/40 bg-accent/10 px-2 py-1.5 text-[11px] font-medium text-accent transition-colors hover:bg-accent/20"
+        >
+          <span aria-hidden>↙</span>
+          Pull
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            saveToCredentials(
+              [bubble.title, bubble.sourceContent, bubble.notes]
+                .filter(Boolean)
+                .join("\n"),
+            )
+          }
+          className="flex items-center justify-center rounded-md border border-line-soft px-2 py-1.5 text-[10px] font-medium text-fg-mute hover:border-accent/40 hover:text-accent"
+          title="Save to credentials"
+        >
+          Creds
+        </button>
+      </div>
+
+      <ResizeHandle onResizeStart={onResizeStart} />
+    </div>
+  );
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Orbit hackspace UI
+After=network.target
+# Do not hard-depend on the agent; the UI still serves the demo if the agent is down.
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/orbit
+EnvironmentFile=/path/to/orbit/.env
+ExecStart=/usr/bin/node /path/to/orbit/node_modules/next/dist/bin/next start -H 127.0.0.1 -p 3010
+Restart=on-failure
+RestartSec=3
+User=orbit
+Group=orbit
+
+[Install]
+WantedBy=multi-user.target
