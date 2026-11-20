@@ -5,7 +5,7 @@ export const ORBIT_RADIUS_MAX = 320;
 
 /** Card (true rectangle) bubble size — readable for long findings */
 export const BUBBLE_W = 300;
-export const BUBBLE_H = 260;
+export const BUBBLE_H = 360;
 
 /** Round (circular) bubble diameter bounds — larger safe inner circle */
 export const ROUND_D_MIN = 200;

@@ -344,6 +344,8 @@ export async function checkOrbitAuth(): Promise<boolean> {
 export type OrbitAgentRequest = OrbitChatRequest & {
   /** Default true: send tools and run BFF tool rounds. */
   enableTools?: boolean;
+  /** OpenClaw / OpenAI "user" field — used as a stable conversation id. */
+  user?: string;
 };
 
 export async function* streamOrbitAgent(
@@ -386,6 +388,7 @@ export async function* streamOrbitAgent(
         messages: req.messages,
         credentialsContext: req.credentialsContext,
         bubbleContext: req.bubbleContext,
+        user: req.user,
         max_tokens: 4096,
       }),
     });

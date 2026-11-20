@@ -2,7 +2,10 @@
 
 import {
   useCallback,
+  useEffect,
   useRef,
+  useState,
+  type FormEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { clamp } from "./physics";
@@ -93,6 +96,122 @@ function ResizeHandle({
   );
 }
 
+function BubbleChat({
+  bubble,
+  compact,
+}: {
+  bubble: OrbitBubbleState;
+  compact?: boolean;
+}) {
+  const { sendBubbleMessage } = useOrbitStore();
+  const [draft, setDraft] = useState("");
+  const scroller = useRef<HTMLDivElement>(null);
+  const stickRef = useRef(true);
+  const running = bubble.status === "running";
+  const msgs = bubble.messages ?? [];
+
+  useEffect(() => {
+    if (!stickRef.current || !scroller.current) return;
+    scroller.current.scrollTop = scroller.current.scrollHeight;
+  }, [msgs, running]);
+
+  function onScroll() {
+    const el = scroller.current;
+    if (!el) return;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickRef.current = dist < 32;
+  }
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    sendBubbleMessage(bubble.id, draft);
+    setDraft("");
+  }
+
+  const bodyText = compact ? "text-[9px]" : "text-[11px]";
+  const labelText = compact ? "text-[8px]" : "text-[9px]";
+  const excerpt =
+    bubble.sourceContent.length > 90
+      ? `${bubble.sourceContent.slice(0, 90).trim()}…`
+      : bubble.sourceContent;
+
+  return (
+    <>
+      {excerpt.trim() ? (
+        <p className={`shrink-0 font-mono leading-snug text-fg-mute ${labelText}`}>
+          {excerpt}
+        </p>
+      ) : null}
+      <div
+        ref={scroller}
+        onScroll={onScroll}
+        className="min-h-0 flex-1 space-y-1 overflow-y-auto"
+      >
+        {msgs.map((m) => {
+          const isUser = m.role === "user";
+          const isSystem = m.role === "system";
+          return (
+            <div
+              key={m.id}
+              className={`rounded-md border px-1.5 py-1 ${
+                isSystem
+                  ? "border-transparent bg-transparent"
+                  : "border-line-soft/60 bg-bg/40"
+              }`}
+            >
+              <div
+                className={`mb-0.5 font-mono uppercase tracking-wider ${labelText} ${
+                  isUser
+                    ? "text-cyan"
+                    : isSystem
+                      ? "text-fg-mute"
+                      : "text-accent/80"
+                }`}
+              >
+                {isSystem ? "context" : m.role}
+              </div>
+              <p
+                className={`whitespace-pre-wrap leading-relaxed ${bodyText} ${
+                  isSystem ? "text-fg-mute" : "text-fg-dim"
+                }`}
+              >
+                {m.content || (running && m.role === "assistant" ? "…" : "")}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+      <form
+        onSubmit={submit}
+        className="shrink-0"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex gap-1">
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Message the sub-agent…"
+            disabled={running}
+            className={`min-w-0 flex-1 rounded-full border border-line bg-bg px-2 py-1 text-fg placeholder:text-fg-mute focus:border-accent/40 focus:outline-none disabled:opacity-50 ${
+              compact ? "text-[10px]" : "text-[12px]"
+            }`}
+            aria-label="Message the sub-agent"
+          />
+          <button
+            type="submit"
+            disabled={running || !draft.trim()}
+            className={`shrink-0 rounded-full border border-accent/40 bg-accent/15 font-medium text-accent hover:bg-accent/25 disabled:opacity-50 ${
+              compact ? "px-2 py-1 text-[9px]" : "px-2.5 py-1 text-[11px]"
+            }`}
+          >
+            {running ? "…" : "Send"}
+          </button>
+        </div>
+      </form>
+    </>
+  );
+}
+
 export function OrbitBubble({ bubble }: Props) {
   const {
     updateBubble,
@@ -125,7 +244,7 @@ export function OrbitBubble({ bubble }: Props) {
   const onPointerDown = useCallback(
     (e: ReactPointerEvent) => {
       const target = e.target as HTMLElement;
-      if (target.closest("textarea, input, button, a, [role='separator']"))
+      if (target.closest("textarea, input, button, a, form, [role='separator']"))
         return;
       e.currentTarget.setPointerCapture(e.pointerId);
       drag.current = {
@@ -219,11 +338,6 @@ export function OrbitBubble({ bubble }: Props) {
     setBubbleShape(bubble.id, shape === "round" ? "card" : "round");
   };
 
-  const truncatedSource =
-    bubble.sourceContent.length > 72
-      ? `${bubble.sourceContent.slice(0, 72).trim()}…`
-      : bubble.sourceContent;
-
   if (shape === "round") {
     return (
       <div
@@ -285,30 +399,8 @@ export function OrbitBubble({ bubble }: Props) {
           </span>
         </div>
 
-        <div className="orbit-bubble-round-body mx-[12%] mb-1 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-1">
-          <p className="text-center font-mono text-[9px] leading-snug text-fg-mute">
-            {truncatedSource}
-          </p>
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-md bg-bg/40 px-1.5 py-1">
-            <p className="whitespace-pre-wrap font-mono text-[9px] leading-relaxed text-fg-dim">
-              {bubble.sourceContent}
-            </p>
-          </div>
-          <textarea
-            value={bubble.notes}
-            onChange={(e) => updateBubble(bubble.id, { notes: e.target.value })}
-            placeholder="Notes…"
-            rows={2}
-            className="w-full shrink-0 resize-none rounded-md border border-line-soft bg-bg/50 px-2 py-1 text-[10px] text-fg-dim placeholder:text-fg-mute focus:border-accent/30 focus:outline-none"
-            aria-label="Bubble notes"
-          />
-          {bubble.subagentLog.length > 0 && (
-            <ul className="max-h-12 shrink-0 space-y-0.5 overflow-y-auto rounded-md border border-line-soft bg-bg/40 px-1.5 py-1 font-mono text-[8px] leading-relaxed text-fg-mute">
-              {bubble.subagentLog.map((line, i) => (
-                <li key={`${i}-${line.slice(0, 12)}`}>{line}</li>
-              ))}
-            </ul>
-          )}
+        <div className="orbit-bubble-round-body mx-[12%] mb-1 flex min-h-0 flex-1 flex-col gap-1 overflow-hidden px-1">
+          <BubbleChat bubble={bubble} compact />
         </div>
 
         <div className="flex shrink-0 flex-wrap justify-center gap-1 px-[14%] pb-[11%] pt-1">
@@ -415,27 +507,8 @@ export function OrbitBubble({ bubble }: Props) {
         </button>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 py-2">
-        <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-line-soft/60 bg-bg/40 px-2 py-1.5">
-          <p className="whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-fg-dim">
-            {bubble.sourceContent}
-          </p>
-        </div>
-        <textarea
-          value={bubble.notes}
-          onChange={(e) => updateBubble(bubble.id, { notes: e.target.value })}
-          placeholder="Notes / comments…"
-          rows={2}
-          className="w-full shrink-0 resize-none rounded-md border border-line-soft bg-bg/50 px-2 py-1.5 text-[11px] text-fg-dim placeholder:text-fg-mute focus:border-accent/30 focus:outline-none"
-          aria-label="Bubble notes"
-        />
-        {bubble.subagentLog.length > 0 && (
-          <ul className="max-h-24 shrink-0 space-y-0.5 overflow-y-auto rounded-md border border-line-soft bg-bg/40 px-2 py-1.5 font-mono text-[9px] leading-relaxed text-fg-mute">
-            {bubble.subagentLog.map((line, i) => (
-              <li key={`${i}-${line.slice(0, 12)}`}>{line}</li>
-            ))}
-          </ul>
-        )}
+      <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden px-3 py-2">
+        <BubbleChat bubble={bubble} />
       </div>
 
       <div className="flex shrink-0 gap-1.5 border-t border-line px-2 py-2 pr-6">

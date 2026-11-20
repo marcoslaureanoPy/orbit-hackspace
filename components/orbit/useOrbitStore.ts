@@ -85,6 +85,8 @@ export type OrbitBubbleState = {
   sourceContent: string;
   status: BubbleStatus;
   subagentLog: string[];
+  /** Sub-agent conversation in this bubble (separate from the core chat). */
+  messages: CoreMessage[];
   x: number;
   y: number;
   createdAt: number;
@@ -138,6 +140,8 @@ type OrbitStore = {
   resizeBubble: (id: string, w: number, h: number) => void;
   nudgeBubbleSize: (id: string, delta: number) => void;
   playBubble: (id: string) => void;
+  /** Send a normal chat turn in a bubble's own sub-agent session. */
+  sendBubbleMessage: (id: string, content: string) => void;
   pullToCore: (id: string) => void;
   dismissBubble: (id: string) => void;
   appendUserMessage: (content: string) => void;
@@ -166,6 +170,57 @@ const OrbitCtx = createContext<OrbitStore | null>(null);
 
 function uid(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+}
+
+/** Stable OpenClaw conversation id for one bubble, separate from the core session. */
+export function bubbleSessionUser(bubbleId: string) {
+  return `conv:orbit-bubble-${bubbleId}`;
+}
+
+function migrateMessages(raw: unknown): CoreMessage[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CoreMessage[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const m = item as Partial<CoreMessage>;
+    if (typeof m.id !== "string" || typeof m.content !== "string") continue;
+    if (
+      m.role !== "user" &&
+      m.role !== "assistant" &&
+      m.role !== "system" &&
+      m.role !== "merge"
+    ) {
+      continue;
+    }
+    out.push({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      createdAt: typeof m.createdAt === "number" ? m.createdAt : Date.now(),
+    });
+  }
+  return out;
+}
+
+function bubbleSeedMessage(
+  title: string,
+  sourceContent: string,
+  notes: string,
+): CoreMessage {
+  return {
+    id: uid("msg"),
+    role: "system",
+    content: [
+      "You are an Orbit sub-agent. This conversation stays in this bubble, separate from the core chat.",
+      title.trim() ? `Finding title: ${title.trim()}` : null,
+      "Source finding:",
+      sourceContent.trim() || "(empty)",
+      notes.trim() ? `Operator notes: ${notes.trim()}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    createdAt: Date.now(),
+  };
 }
 
 function seedDemoMessages(): CoreMessage[] {
@@ -248,6 +303,19 @@ function migrateBubble(raw: Partial<OrbitBubbleState>): OrbitBubbleState | null 
         ? raw.status
         : "idle",
     subagentLog: Array.isArray(raw.subagentLog) ? raw.subagentLog : [],
+    messages: (() => {
+      const existing = migrateMessages(raw.messages);
+      if (existing.length > 0) return existing;
+      return content
+        ? [
+            bubbleSeedMessage(
+              typeof raw.title === "string" ? raw.title : "Finding",
+              content,
+              typeof raw.notes === "string" ? raw.notes : "",
+            ),
+          ]
+        : [];
+    })(),
     x: typeof raw.x === "number" ? raw.x : 0,
     y: typeof raw.y === "number" ? raw.y : 0,
     createdAt: typeof raw.createdAt === "number" ? raw.createdAt : Date.now(),
@@ -449,6 +517,8 @@ export function OrbitProvider({
   const syncCredsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chatAbortRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<CoreMessage[]>([]);
+  const bubblesRef = useRef<OrbitBubbleState[]>([]);
+  const bubbleAbortRef = useRef<Map<string, AbortController>>(new Map());
   const modeRef = useRef<OrbitMode>(mode);
   modeRef.current = mode;
   const chatModeRef = useRef<"mock" | "live">(mode === "live" ? "live" : "mock");
@@ -464,6 +534,7 @@ export function OrbitProvider({
 
   useEffect(() => {
     messagesRef.current = messages;
+    bubblesRef.current = bubbles;
   }, [messages]);
 
   useEffect(() => {
@@ -658,6 +729,9 @@ export function OrbitProvider({
             sourceContent: msg.content,
             status: "idle",
             subagentLog: [],
+            messages: [
+              bubbleSeedMessage(title.replace(/\s+/g, " "), msg.content, ""),
+            ],
             x,
             y,
             createdAt: Date.now(),
@@ -843,184 +917,252 @@ export function OrbitProvider({
     [],
   );
 
-  const playBubble = useCallback(
-    (id: string) => {
-      const creds = credentialsRef.current;
-      const credLog = buildCredentialsLogLine(creds);
-      const isDemo = modeRef.current === "demo";
-      const credCtx = buildCredentialsContext(creds, {
-        includeSecrets: isDemo,
-      });
+  const sendBubbleMessage = useCallback((id: string, content: string) => {
+    const textIn = content.trim();
+    if (!textIn) return;
+    const current = bubblesRef.current.find((b) => b.id === id);
+    if (!current || current.status === "running") return;
 
-      setBubbles((prev) => {
-        const target = prev.find((b) => b.id === id);
-        if (!target || target.status === "running") return prev;
-        return prev.map((b) =>
+    const creds = credentialsRef.current;
+    const credLog = buildCredentialsLogLine(creds);
+    const isDemo = modeRef.current === "demo";
+    const credCtx = buildCredentialsContext(creds, {
+      includeSecrets: isDemo,
+    });
+
+    const userMsg: CoreMessage = {
+      id: uid("msg"),
+      role: "user",
+      content: textIn,
+      createdAt: Date.now(),
+    };
+    const assistantId = uid("msg");
+    const assistantMsg: CoreMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      createdAt: Date.now() + 1,
+    };
+
+    setBubbles((prev) =>
+      prev.map((b) =>
+        b.id === id
+          ? {
+              ...b,
+              status: "running" as const,
+              messages: [...(b.messages ?? []), userMsg, assistantMsg],
+              subagentLog: [...b.subagentLog, credLog].slice(-16),
+            }
+          : b,
+      ),
+    );
+
+    const useLive =
+      modeRef.current === "live" && chatModeRef.current === "live";
+    if (!useLive) {
+      const awareNote = credCtx
+        ? ` Acknowledged credentials vault (${creds.filter((c) => c.resource.trim() || c.secret.trim()).length} entries).`
+        : "";
+      setBubbles((prev) =>
+        prev.map((b) =>
           b.id === id
             ? {
                 ...b,
-                status: "running" as const,
-                subagentLog: [credLog, "Starting Orbit Play…"],
+                status: "done" as const,
+                messages: (b.messages ?? []).map((m) =>
+                  m.id === assistantId
+                    ? {
+                        ...m,
+                        content: `Acknowledged (demo mock). This sub-agent thread stays in this bubble.${awareNote}\n(${credLog})`,
+                      }
+                    : m,
+                ),
               }
             : b,
-        );
-      });
+        ),
+      );
+      return;
+    }
 
-      const existing = subagentTimers.current.get(id);
-      if (existing) clearInterval(existing);
+    const existingAbort = bubbleAbortRef.current.get(id);
+    if (existingAbort) existingAbort.abort();
+    const ac = new AbortController();
+    bubbleAbortRef.current.set(id, ac);
 
-      const useLive =
-        modeRef.current === "live" && chatModeRef.current === "live";
-      if (!useLive) {
-        runMockPlay(id, credLog, credCtx);
-        return;
-      }
-
-      void (async () => {
-        let target: OrbitBubbleState | undefined;
-        setBubbles((prev) => {
-          target = prev.find((b) => b.id === id);
-          return prev;
-        });
-        await Promise.resolve();
-        const b = target;
-        if (!b) {
-          setBubbles((prev) =>
-            prev.map((x) =>
-              x.id === id
-                ? {
-                    ...x,
-                    status: "idle" as const,
-                    subagentLog: [...x.subagentLog, "Bubble missing — aborted"],
-                  }
-                : x,
-            ),
-          );
-          return;
-        }
-
-        // Keep Play payload small: short core snap + bubble only.
-        const coreSnap = messagesRef.current
-          .filter((m) => m.role === "user" || m.role === "assistant")
-          .slice(-4)
-          .map((m) => {
-            const c =
-              m.content.length > 400
-                ? `${m.content.slice(0, 400)}…`
-                : m.content;
-            return `${m.role}: ${c}`;
-          })
-          .join("\n\n");
-
-        let assembled = "";
-        try {
-          for await (const chunk of streamOrbitAgent({
-            messages: [
-              {
-                role: "system",
-                content:
-                  "You are Orbit Play — a focused subagent. Return concise findings and next steps.",
-              },
-              {
-                role: "user",
-                content: `Recent core:\n${coreSnap || "(empty)"}\n\nInvestigate the ejected bubble and report back.`,
-              },
-            ],
-            bubbleContext: {
-              title: b.title,
-              notes: b.notes.slice(0, 500),
-              sourceContent: b.sourceContent.slice(0, 2000),
-            },
-            credentialsContext: credCtx || undefined,
-            engine: "fast",
-            timeoutMs: 90000,
-            enableTools: true,
-          })) {
-            if (chunk.type === "token" && chunk.text) {
-              assembled += chunk.text;
-              const snap = assembled;
-              setBubbles((prev) =>
-                prev.map((x) =>
-                  x.id === id
-                    ? {
-                        ...x,
-                        subagentLog: [
-                          credLog,
-                          "Live NanoGrav stream…",
-                          snap.slice(-1200),
-                        ],
-                      }
-                    : x,
-                ),
-              );
-            } else if (chunk.type === "step" && chunk.text) {
-              const line = `⚙ ${chunk.text}`;
-              setBubbles((prev) =>
-                prev.map((x) =>
-                  x.id === id
-                    ? { ...x, subagentLog: [...x.subagentLog, line].slice(-16) }
-                    : x,
-                ),
-              );
-            } else if (chunk.type === "error") {
-              setBubbles((prev) =>
-                prev.map((x) =>
-                  x.id === id
-                    ? {
-                        ...x,
-                        status: "idle" as const,
-                        subagentLog: [
-                          credLog,
-                          `⚠️ Live Play failed: ${chunk.error || "request failed"}. Retry Play — mock was not used.`,
-                        ],
-                      }
-                    : x,
-                ),
-              );
-              return;
-            } else if (chunk.type === "done") {
-              setBubbles((prev) =>
-                prev.map((x) =>
-                  x.id === id
-                    ? {
-                        ...x,
-                        status: "done" as const,
-                        subagentLog: [
-                          credLog,
-                          "Live Play complete",
-                          assembled.trim() || "(empty reply)",
-                        ],
-                      }
-                    : x,
-                ),
-              );
-              return;
-            }
+    const historySource = [...(current.messages ?? []), userMsg];
+    void (async () => {
+      const history = historySource
+        .filter(
+          (m) =>
+            m.role === "user" ||
+            m.role === "assistant" ||
+            m.role === "system",
+        )
+        .slice(-8)
+        .map((m) => {
+          const role = (
+            m.role === "merge" ? "assistant" : m.role
+          ) as "system" | "user" | "assistant";
+          let body = m.content;
+          if (role === "system" && body.length > 280) {
+            body = `${body.slice(0, 280)}…`;
+          } else if (body.length > 1200) {
+            body = `${body.slice(0, 1200)}…`;
           }
+          return { role, content: body };
+        });
+
+      let assembled = "";
+      let failed = false;
+      try {
+        for await (const chunk of streamOrbitAgent({
+          messages: history,
+          bubbleContext: {
+            title: current.title,
+            notes: current.notes.slice(0, 500),
+            sourceContent: current.sourceContent.slice(0, 2000),
+          },
+          credentialsContext: credCtx || undefined,
+          user: bubbleSessionUser(id),
+          signal: ac.signal,
+          engine: "fast",
+          timeoutMs: 90000,
+          enableTools: true,
+        })) {
+          if (chunk.type === "token" && chunk.text) {
+            assembled += chunk.text;
+            const snap = assembled;
+            setBubbles((prev) =>
+              prev.map((b) =>
+                b.id === id
+                  ? {
+                      ...b,
+                      messages: (b.messages ?? []).map((m) =>
+                        m.id === assistantId ? { ...m, content: snap } : m,
+                      ),
+                    }
+                  : b,
+              ),
+            );
+          } else if (chunk.type === "step" && chunk.text) {
+            const line = chunk.text;
+            setBubbles((prev) =>
+              prev.map((b) =>
+                b.id === id
+                  ? {
+                      ...b,
+                      messages: (b.messages ?? []).map((m) =>
+                        m.id === assistantId
+                          ? {
+                              ...m,
+                              content: assembled
+                                ? `${assembled}\n\n_${line}_`
+                                : `_${line}_`,
+                            }
+                          : m,
+                      ),
+                      subagentLog: [...b.subagentLog, `⚙ ${line}`].slice(-16),
+                    }
+                  : b,
+              ),
+            );
+          } else if (chunk.type === "error") {
+            failed = true;
+            const errText = chunk.error || "Live request failed. Try again.";
+            setBubbles((prev) =>
+              prev.map((b) =>
+                b.id === id
+                  ? {
+                      ...b,
+                      status: "idle" as const,
+                      messages: (b.messages ?? []).map((m) =>
+                        m.id === assistantId
+                          ? {
+                              ...m,
+                              content:
+                                assembled.trim() ||
+                                `⚠️ Live request failed: ${errText}`,
+                            }
+                          : m,
+                      ),
+                    }
+                  : b,
+              ),
+            );
+          }
+        }
+        if (!failed && !assembled.trim()) {
           setBubbles((prev) =>
-            prev.map((x) =>
-              x.id === id ? { ...x, status: "done" as const } : x,
+            prev.map((b) =>
+              b.id === id
+                ? {
+                    ...b,
+                    status: "idle" as const,
+                    messages: (b.messages ?? []).map((m) =>
+                      m.id === assistantId
+                        ? {
+                            ...m,
+                            content:
+                              "⚠️ Empty engine reply. Try a shorter prompt.",
+                          }
+                        : m,
+                    ),
+                  }
+                : b,
             ),
           );
-        } catch (err) {
+        } else if (!failed) {
           setBubbles((prev) =>
-            prev.map((x) =>
-              x.id === id
-                ? {
-                    ...x,
-                    status: "idle" as const,
-                    subagentLog: [
-                      credLog,
-                      `⚠️ ${err instanceof Error ? err.message : "Play failed"}. Retry — mock was not used.`,
-                    ],
-                  }
-                : x,
+            prev.map((b) =>
+              b.id === id ? { ...b, status: "done" as const } : b,
             ),
           );
         }
-      })();
+      } catch (err) {
+        if ((err as Error)?.name === "AbortError") {
+          setBubbles((prev) =>
+            prev.map((b) =>
+              b.id === id ? { ...b, status: "idle" as const } : b,
+            ),
+          );
+        } else {
+          setBubbles((prev) =>
+            prev.map((b) =>
+              b.id === id
+                ? {
+                    ...b,
+                    status: "idle" as const,
+                    messages: (b.messages ?? []).map((m) =>
+                      m.id === assistantId
+                        ? {
+                            ...m,
+                            content:
+                              assembled.trim() ||
+                              `⚠️ ${err instanceof Error ? err.message : "Request failed"}`,
+                          }
+                        : m,
+                    ),
+                  }
+                : b,
+            ),
+          );
+        }
+      } finally {
+        if (bubbleAbortRef.current.get(id) === ac) {
+          bubbleAbortRef.current.delete(id);
+        }
+      }
+    })();
+  }, []);
+
+  const playBubble = useCallback(
+    (id: string) => {
+      sendBubbleMessage(
+        id,
+        "Investigate this ejected finding and report concise next steps.",
+      );
     },
-    [runMockPlay],
+    [sendBubbleMessage],
   );
 
   const pullToCore = useCallback((id: string) => {
@@ -1032,18 +1174,21 @@ export function OrbitProvider({
     setBubbles((prev) => {
       const b = prev.find((x) => x.id === id);
       if (!b) return prev;
-      const log =
-        b.subagentLog.length > 0
+      const chat =
+        (b.messages ?? []).filter((m) => m.role !== "system" && m.content.trim())
+          .map((m) => `  ${m.role}: ${m.content}`)
+          .join("\n")
+        || (b.subagentLog.length > 0
           ? b.subagentLog.map((l) => `  · ${l}`).join("\n")
-          : "  · (no subagent run — notes only)";
+          : "  · (no sub-agent chat yet)");
       const block = [
         "─── Pulled from orbit ───",
         `Bubble: ${b.title}`,
         b.notes.trim() ? `Notes: ${b.notes.trim()}` : null,
         "Source finding:",
         b.sourceContent,
-        "Subagent:",
-        log,
+        "Sub-agent chat:",
+        chat,
         "─── end pull ───",
       ]
         .filter(Boolean)
@@ -1066,6 +1211,11 @@ export function OrbitProvider({
     if (timer) {
       clearInterval(timer);
       subagentTimers.current.delete(id);
+    }
+    const pending = bubbleAbortRef.current.get(id);
+    if (pending) {
+      pending.abort();
+      bubbleAbortRef.current.delete(id);
     }
     setBubbles((prev) => prev.filter((b) => b.id !== id));
   }, []);
@@ -1331,6 +1481,8 @@ _${line}_`
     setStreaming(false);
     subagentTimers.current.forEach((t) => clearInterval(t));
     subagentTimers.current.clear();
+    bubbleAbortRef.current.forEach((ac) => ac.abort());
+    bubbleAbortRef.current.clear();
     streamIndexRef.current = 0;
     setBubbles([]);
     setSelectedMessageId(null);
@@ -1366,6 +1518,7 @@ _${line}_`
       resizeBubble,
       nudgeBubbleSize,
       playBubble,
+      sendBubbleMessage,
       pullToCore,
       dismissBubble,
       appendUserMessage,
@@ -1402,6 +1555,7 @@ _${line}_`
       resizeBubble,
       nudgeBubbleSize,
       playBubble,
+      sendBubbleMessage,
       pullToCore,
       dismissBubble,
       appendUserMessage,
