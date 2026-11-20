@@ -5,9 +5,13 @@ import {
   useEffect,
   useRef,
   useState,
+  type DragEvent,
   type FormEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { EjectMessageButton } from "./EjectMessageButton";
+import { excerptOf } from "@/lib/orbit/ejectSeed";
+import { ORBIT_DRAG_MIME, ORBIT_PARENT_MIME } from "./OrbitCore";
 import { clamp } from "./physics";
 import {
   useOrbitStore,
@@ -23,6 +27,24 @@ const STATUS_LABEL: Record<OrbitBubbleState["status"], string> = {
   running: "Running",
   done: "Done",
 };
+
+function originLine(bubble: OrbitBubbleState): string {
+  const from = bubble.parentTitle || "Core";
+  const role = bubble.sourceRole || "assistant";
+  const excerpt = bubble.sourceExcerpt || excerptOf(bubble.sourceContent);
+  return `From ${from} · ${role}: “${excerpt}”`;
+}
+
+function onBubbleMsgDragStart(
+  e: DragEvent,
+  messageId: string,
+  parentBubbleId: string,
+) {
+  e.dataTransfer.setData(ORBIT_DRAG_MIME, messageId);
+  e.dataTransfer.setData("text/plain", messageId);
+  e.dataTransfer.setData(ORBIT_PARENT_MIME, parentBubbleId);
+  e.dataTransfer.effectAllowed = "copy";
+}
 
 function SizeControls({
   onShrink,
@@ -103,7 +125,7 @@ function BubbleChat({
   bubble: OrbitBubbleState;
   compact?: boolean;
 }) {
-  const { sendBubbleMessage } = useOrbitStore();
+  const { sendBubbleMessage, ejectToOrbit } = useOrbitStore();
   const [draft, setDraft] = useState("");
   const scroller = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
@@ -130,18 +152,9 @@ function BubbleChat({
 
   const bodyText = compact ? "text-[9px]" : "text-[11px]";
   const labelText = compact ? "text-[8px]" : "text-[9px]";
-  const excerpt =
-    bubble.sourceContent.length > 90
-      ? `${bubble.sourceContent.slice(0, 90).trim()}…`
-      : bubble.sourceContent;
 
   return (
     <>
-      {excerpt.trim() ? (
-        <p className={`shrink-0 font-mono leading-snug text-fg-mute ${labelText}`}>
-          {excerpt}
-        </p>
-      ) : null}
       <div
         ref={scroller}
         onScroll={onScroll}
@@ -150,33 +163,61 @@ function BubbleChat({
         {msgs.map((m) => {
           const isUser = m.role === "user";
           const isSystem = m.role === "system";
+          const isMerge = m.role === "merge";
           return (
             <div
               key={m.id}
+              draggable
+              onDragStart={(e) => onBubbleMsgDragStart(e, m.id, bubble.id)}
               className={`rounded-md border px-1.5 py-1 ${
                 isSystem
                   ? "border-transparent bg-transparent"
-                  : "border-line-soft/60 bg-bg/40"
+                  : isMerge
+                    ? "border-accent/25 bg-[rgba(61,207,176,0.06)]"
+                    : "border-line-soft/60 bg-bg/40"
               }`}
             >
-              <div
-                className={`mb-0.5 font-mono uppercase tracking-wider ${labelText} ${
-                  isUser
-                    ? "text-cyan"
-                    : isSystem
-                      ? "text-fg-mute"
-                      : "text-accent/80"
-                }`}
-              >
-                {isSystem ? "context" : m.role}
+              <div className="mb-0.5 flex items-center justify-between gap-1">
+                <span
+                  className={`font-mono uppercase tracking-wider ${labelText} ${
+                    isUser
+                      ? "text-cyan"
+                      : isSystem
+                        ? "text-fg-mute"
+                        : isMerge
+                          ? "text-accent"
+                          : "text-accent/80"
+                  }`}
+                >
+                  {isSystem ? "context" : isMerge ? "merge" : m.role}
+                </span>
+                <EjectMessageButton
+                  compact={compact}
+                  onEject={() =>
+                    ejectToOrbit(m.id, { parentBubbleId: bubble.id })
+                  }
+                />
               </div>
-              <p
-                className={`whitespace-pre-wrap leading-relaxed ${bodyText} ${
-                  isSystem ? "text-fg-mute" : "text-fg-dim"
-                }`}
-              >
-                {m.content || (running && m.role === "assistant" ? "…" : "")}
-              </p>
+              {isSystem ? (
+                <details className="group">
+                  <summary
+                    className={`cursor-pointer font-mono text-fg-mute ${labelText}`}
+                  >
+                    Parent context seed
+                  </summary>
+                  <p
+                    className={`mt-1 whitespace-pre-wrap leading-relaxed text-fg-mute ${bodyText}`}
+                  >
+                    {m.content}
+                  </p>
+                </details>
+              ) : (
+                <p
+                  className={`whitespace-pre-wrap leading-relaxed ${bodyText} text-fg-dim`}
+                >
+                  {m.content || (running && m.role === "assistant" ? "…" : "")}
+                </p>
+              )}
             </div>
           );
         })}
@@ -244,7 +285,7 @@ export function OrbitBubble({ bubble }: Props) {
   const onPointerDown = useCallback(
     (e: ReactPointerEvent) => {
       const target = e.target as HTMLElement;
-      if (target.closest("textarea, input, button, a, form, [role='separator']"))
+      if (target.closest("textarea, input, button, a, form, details, summary, [role='separator']"))
         return;
       e.currentTarget.setPointerCapture(e.pointerId);
       drag.current = {
@@ -389,6 +430,12 @@ export function OrbitBubble({ bubble }: Props) {
             className="mt-1 w-full bg-transparent text-center text-[11px] font-medium text-fg outline-none placeholder:text-fg-mute"
             aria-label="Bubble title"
           />
+          <p
+            className="mt-0.5 w-full truncate text-center font-mono text-[8px] leading-snug text-fg-mute"
+            title={originLine(bubble)}
+          >
+            {originLine(bubble)}
+          </p>
           <span
             className={`font-mono text-[8px] uppercase tracking-wider ${statusColor}`}
           >
@@ -417,6 +464,11 @@ export function OrbitBubble({ bubble }: Props) {
             type="button"
             onClick={() => pullToCore(bubble.id)}
             className="flex items-center justify-center gap-0.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-[10px] font-medium text-accent transition-colors hover:bg-accent/20"
+            title={
+              bubble.parentId
+                ? "Pull this work back into the parent bubble"
+                : "Pull this work back into the core"
+            }
           >
             <span aria-hidden>↙</span>
             Pull
@@ -469,6 +521,12 @@ export function OrbitBubble({ bubble }: Props) {
             className="w-full bg-transparent text-[12px] font-medium text-fg outline-none placeholder:text-fg-mute"
             aria-label="Bubble title"
           />
+          <p
+            className="mt-0.5 truncate font-mono text-[9px] leading-snug text-fg-mute"
+            title={originLine(bubble)}
+          >
+            {originLine(bubble)}
+          </p>
           <div className="mt-0.5 flex items-center gap-2">
             <span
               className={`font-mono text-[9px] uppercase tracking-wider ${statusColor}`}
@@ -525,6 +583,11 @@ export function OrbitBubble({ bubble }: Props) {
           type="button"
           onClick={() => pullToCore(bubble.id)}
           className="flex flex-1 items-center justify-center gap-1 rounded-md border border-accent/40 bg-accent/10 px-2 py-1.5 text-[11px] font-medium text-accent transition-colors hover:bg-accent/20"
+          title={
+            bubble.parentId
+              ? "Pull this work back into the parent bubble"
+              : "Pull this work back into the core"
+          }
         >
           <span aria-hidden>↙</span>
           Pull

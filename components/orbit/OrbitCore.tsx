@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { EjectMessageButton } from "./EjectMessageButton";
 import { useOrbitStore } from "./useOrbitStore";
 
 export const ORBIT_DRAG_MIME = "application/x-orbit-message-id";
+export const ORBIT_PARENT_MIME = "application/x-orbit-parent-bubble";
 
 export function OrbitCore() {
   const {
@@ -42,9 +44,16 @@ export function OrbitCore() {
     setDraft("");
   }
 
-  function onMsgDragStart(e: DragEvent, messageId: string) {
+  function onMsgDragStart(
+    e: DragEvent,
+    messageId: string,
+    parentBubbleId?: string,
+  ) {
     e.dataTransfer.setData(ORBIT_DRAG_MIME, messageId);
     e.dataTransfer.setData("text/plain", messageId);
+    if (parentBubbleId) {
+      e.dataTransfer.setData(ORBIT_PARENT_MIME, parentBubbleId);
+    }
     e.dataTransfer.effectAllowed = "copy";
   }
 
@@ -126,7 +135,7 @@ export function OrbitCore() {
       </div>
 
       <p className={hintPad}>
-        Drag a finding out, or select and Eject
+        Eject a message to continue that part in its own session, or drag it out
       </p>
 
       {/* Scrollable messages */}
@@ -148,9 +157,8 @@ export function OrbitCore() {
           const isMerge = m.role === "merge";
           const isSystem = m.role === "system";
           return (
-            <button
+            <div
               key={m.id}
-              type="button"
               draggable
               onDragStart={(e) => onMsgDragStart(e, m.id)}
               onClick={() => selectMessage(selected ? null : m.id)}
@@ -178,9 +186,12 @@ export function OrbitCore() {
                 >
                   {isMerge ? "merge" : m.role}
                 </span>
-                {selected && (
-                  <span className="text-[9px] text-accent">selected</span>
-                )}
+                <div className="flex items-center gap-1.5">
+                  {selected && (
+                    <span className="text-[9px] text-accent">selected</span>
+                  )}
+                  <EjectMessageButton onEject={() => ejectToOrbit(m.id)} />
+                </div>
               </div>
               <p
                 className={`whitespace-pre-wrap text-[11px] leading-relaxed ${
@@ -189,7 +200,7 @@ export function OrbitCore() {
               >
                 {m.content}
               </p>
-            </button>
+            </div>
           );
         })}
       </div>

@@ -4,7 +4,7 @@ import { useEffect, useRef, type DragEvent } from "react";
 import { OrbitBubble } from "./OrbitBubble";
 import { OrbitCloudStatus } from "./OrbitCloudStatus";
 import { OrbitCredentials } from "./OrbitCredentials";
-import { ORBIT_DRAG_MIME, OrbitCore } from "./OrbitCore";
+import { ORBIT_DRAG_MIME, ORBIT_PARENT_MIME, OrbitCore } from "./OrbitCore";
 import { spokePath } from "./physics";
 import {
   OrbitProvider,
@@ -62,7 +62,8 @@ function OrbitCanvas() {
     const rect = rootRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    ejectToOrbit(id, { x, y, shape: "card" });
+    const parentBubbleId = e.dataTransfer.getData(ORBIT_PARENT_MIME) || undefined;
+    ejectToOrbit(id, { x, y, shape: "card", parentBubbleId });
   }
 
   if (!ready) {

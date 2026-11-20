@@ -52,6 +52,10 @@ Back up the Caddyfile, run `caddy validate --config /etc/caddy/Caddyfile` (or yo
 
 A sample systemd unit is in `deploy/orbit.service`.
 
+## Bubbles
+
+Each bubble is a sub-agent with its own chat and session. Use **Eject** on any message in the core — or on a message inside another bubble — to continue that part in a separate session. The new bubble is seeded with the chosen message, the parent conversation up to that point (trimmed if long), and a short note that this is a sub-agent continuing that work. The bubble header shows which message it came from. **Pull** merges the work back into the parent chat (the core, or the bubble it was ejected from).
+
 ## What this is (and isn’t)
 
 - This is just the Orbit UI + a small server proxy to your agent.
@@ -61,4 +65,4 @@ A sample systemd unit is in `deploy/orbit.service`.
 
 ## Español (corto)
 
-Copia portable de la interfaz Orbit. Configura el agente en `.env`, arranca `npm start` en un puerto local, y publica con un bloque de Caddy. Para OpenClaw en la misma máquina: activa `gateway.http.endpoints.chatCompletions` (solo en loopback) y usa el token del gateway como `AGENT_API_KEY`. Si el link es público, pon `ORBIT_ACCESS_PASSWORD`.
+Copia portable de la interfaz Orbit. Configura el agente en `.env`, arranca `npm start` en un puerto local, y publica con un bloque de Caddy. Para OpenClaw en la misma máquina: activa `gateway.http.endpoints.chatCompletions` (solo en loopback) y usa el token del gateway como `AGENT_API_KEY`. Si el link es público, pon `ORBIT_ACCESS_PASSWORD`. Saca una burbuja desde un mensaje concreto para continuar esa parte en otra sesión, con el contexto del trabajo de donde se sacó.

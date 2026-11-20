@@ -33,6 +33,12 @@ import {
   type CloudStatusDto,
 } from "@/lib/orbit/api";
 import { parseCredentialFromText } from "@/lib/orbit/parseCredentials";
+import {
+  buildEjectedSeed,
+  excerptOf,
+  parentLabel as formatParentLabel,
+  selectBubbleSendHistory,
+} from "@/lib/orbit/ejectSeed";
 
 /** Separate namespaces so demo mock history never pollutes /orbit/app. */
 const STORAGE_KEY_DEMO = "ng_orbit_demo_v6";
@@ -83,6 +89,13 @@ export type OrbitBubbleState = {
   notes: string;
   sourceMessageId: string;
   sourceContent: string;
+  /** null = ejected from the core chat; otherwise the parent bubble id. */
+  parentId: string | null;
+  /** "Core" or the parent bubble title at eject time. */
+  parentTitle: string;
+  sourceRole: CoreMessage["role"];
+  /** Short preview of the chosen source message, shown in the bubble header. */
+  sourceExcerpt: string;
   status: BubbleStatus;
   subagentLog: string[];
   /** Sub-agent conversation in this bubble (separate from the core chat). */
@@ -116,6 +129,8 @@ type EjectOpts = {
   x?: number;
   y?: number;
   shape?: BubbleShape;
+  /** When set, eject a message from this bubble's chat instead of the core. */
+  parentBubbleId?: string;
 };
 
 type OrbitStore = {
@@ -142,6 +157,7 @@ type OrbitStore = {
   playBubble: (id: string) => void;
   /** Send a normal chat turn in a bubble's own sub-agent session. */
   sendBubbleMessage: (id: string, content: string) => void;
+  /** Pull this bubble's work back into its parent (core or parent bubble). */
   pullToCore: (id: string) => void;
   dismissBubble: (id: string) => void;
   appendUserMessage: (content: string) => void;
@@ -200,27 +216,6 @@ function migrateMessages(raw: unknown): CoreMessage[] {
     });
   }
   return out;
-}
-
-function bubbleSeedMessage(
-  title: string,
-  sourceContent: string,
-  notes: string,
-): CoreMessage {
-  return {
-    id: uid("msg"),
-    role: "system",
-    content: [
-      "You are an Orbit sub-agent. This conversation stays in this bubble, separate from the core chat.",
-      title.trim() ? `Finding title: ${title.trim()}` : null,
-      "Source finding:",
-      sourceContent.trim() || "(empty)",
-      notes.trim() ? `Operator notes: ${notes.trim()}` : null,
-    ]
-      .filter(Boolean)
-      .join("\n"),
-    createdAt: Date.now(),
-  };
 }
 
 function seedDemoMessages(): CoreMessage[] {
@@ -298,6 +293,22 @@ function migrateBubble(raw: Partial<OrbitBubbleState>): OrbitBubbleState | null 
     sourceMessageId:
       typeof raw.sourceMessageId === "string" ? raw.sourceMessageId : "",
     sourceContent: content,
+    parentId: typeof raw.parentId === "string" && raw.parentId ? raw.parentId : null,
+    parentTitle:
+      typeof raw.parentTitle === "string" && raw.parentTitle.trim()
+        ? raw.parentTitle
+        : "Core",
+    sourceRole:
+      raw.sourceRole === "user" ||
+      raw.sourceRole === "assistant" ||
+      raw.sourceRole === "system" ||
+      raw.sourceRole === "merge"
+        ? raw.sourceRole
+        : "assistant",
+    sourceExcerpt:
+      typeof raw.sourceExcerpt === "string" && raw.sourceExcerpt.trim()
+        ? raw.sourceExcerpt
+        : excerptOf(content),
     status:
       raw.status === "running" || raw.status === "done" || raw.status === "idle"
         ? raw.status
@@ -306,13 +317,24 @@ function migrateBubble(raw: Partial<OrbitBubbleState>): OrbitBubbleState | null 
     messages: (() => {
       const existing = migrateMessages(raw.messages);
       if (existing.length > 0) return existing;
+      const title = typeof raw.title === "string" ? raw.title : "Finding";
+      const notes = typeof raw.notes === "string" ? raw.notes : "";
       return content
         ? [
-            bubbleSeedMessage(
-              typeof raw.title === "string" ? raw.title : "Finding",
-              content,
-              typeof raw.notes === "string" ? raw.notes : "",
-            ),
+            {
+              id: uid("msg"),
+              role: "system" as const,
+              content: [
+                "You are an Orbit sub-agent. This conversation stays in this bubble, separate from the core chat.",
+                title.trim() ? `Finding title: ${title.trim()}` : null,
+                "Source finding:",
+                content.trim() || "(empty)",
+                notes.trim() ? `Operator notes: ${notes.trim()}` : null,
+              ]
+                .filter(Boolean)
+                .join("\n"),
+              createdAt: Date.now(),
+            },
           ]
         : [];
     })(),
@@ -684,64 +706,92 @@ export function OrbitProvider({
       if (!id) return;
       // Default eject / drag-drop shape = card (readable)
       const shape: BubbleShape = opts?.shape ?? "card";
-      setMessages((msgs) => {
-        const msg = msgs.find((m) => m.id === id);
-        if (!msg) return msgs;
-        setBubbles((prev) => {
-          if (prev.some((b) => b.sourceMessageId === id)) return prev;
-          const size = defaultSizeFor(shape, msg.content.length);
-          let x: number;
-          let y: number;
-          if (
-            typeof opts?.x === "number" &&
-            typeof opts?.y === "number" &&
-            Number.isFinite(opts.x) &&
-            Number.isFinite(opts.y)
-          ) {
-            x = Math.max(0, Math.min(opts.x - size.w / 2, viewport.w - size.w));
-            y = Math.max(0, Math.min(opts.y - size.h / 2, viewport.h - size.h));
-          } else {
-            const cx = viewport.w / 2;
-            const cy = viewport.h / 2;
-            const slot = nextRingSlot(
-              prev.map((b) => ({ x: b.x, y: b.y })),
-              cx,
-              cy,
-              Math.min(
-                280,
-                Math.max(200, Math.min(viewport.w, viewport.h) * 0.32),
-              ),
-              size.w,
-              size.h,
-            );
-            x = slot.x;
-            y = slot.y;
-          }
-          const title =
-            msg.content.length > 48
-              ? `${msg.content.slice(0, 48).trim()}…`
-              : msg.content;
-          const bubble: OrbitBubbleState = {
-            id: uid("bub"),
-            title: title.replace(/\s+/g, " "),
-            notes: "",
-            sourceMessageId: msg.id,
-            sourceContent: msg.content,
-            status: "idle",
-            subagentLog: [],
-            messages: [
-              bubbleSeedMessage(title.replace(/\s+/g, " "), msg.content, ""),
-            ],
-            x,
-            y,
-            createdAt: Date.now(),
-            shape,
-            w: size.w,
-            h: size.h,
-          };
-          return [...prev, bubble];
+      const parentBubbleId = opts?.parentBubbleId;
+      setBubbles((prev) => {
+        if (prev.some((b) => b.sourceMessageId === id)) return prev;
+
+        let parentMessages: CoreMessage[];
+        let parentKind: "core" | "bubble";
+        let parentTitleRaw: string;
+        let parentId: string | null;
+
+        if (parentBubbleId) {
+          const parent = prev.find((b) => b.id === parentBubbleId);
+          if (!parent) return prev;
+          parentMessages = parent.messages ?? [];
+          parentKind = "bubble";
+          parentTitleRaw = parent.title;
+          parentId = parent.id;
+        } else {
+          parentMessages = messagesRef.current;
+          parentKind = "core";
+          parentTitleRaw = "Core";
+          parentId = null;
+        }
+
+        const seeded = buildEjectedSeed({
+          parentMessages,
+          chosenId: id,
+          parentLabel: formatParentLabel(parentKind, parentTitleRaw),
+          newId: () => uid("msg"),
         });
-        return msgs;
+        if (!seeded) return prev;
+        const { seedMessages, chosen } = seeded;
+
+        const size = defaultSizeFor(shape, chosen.content.length);
+        let x: number;
+        let y: number;
+        if (
+          typeof opts?.x === "number" &&
+          typeof opts?.y === "number" &&
+          Number.isFinite(opts.x) &&
+          Number.isFinite(opts.y)
+        ) {
+          x = Math.max(0, Math.min(opts.x - size.w / 2, viewport.w - size.w));
+          y = Math.max(0, Math.min(opts.y - size.h / 2, viewport.h - size.h));
+        } else {
+          const cx = viewport.w / 2;
+          const cy = viewport.h / 2;
+          const slot = nextRingSlot(
+            prev.map((b) => ({ x: b.x, y: b.y })),
+            cx,
+            cy,
+            Math.min(
+              280,
+              Math.max(200, Math.min(viewport.w, viewport.h) * 0.32),
+            ),
+            size.w,
+            size.h,
+          );
+          x = slot.x;
+          y = slot.y;
+        }
+        const title =
+          chosen.content.length > 48
+            ? `${chosen.content.slice(0, 48).trim()}…`
+            : chosen.content;
+        const from = formatParentLabel(parentKind, parentTitleRaw);
+        const bubble: OrbitBubbleState = {
+          id: uid("bub"),
+          title: title.replace(/\s+/g, " "),
+          notes: "",
+          sourceMessageId: chosen.id,
+          sourceContent: chosen.content,
+          parentId,
+          parentTitle: from,
+          sourceRole: chosen.role,
+          sourceExcerpt: excerptOf(chosen.content),
+          status: "idle",
+          subagentLog: [],
+          messages: seedMessages,
+          x,
+          y,
+          createdAt: Date.now(),
+          shape,
+          w: size.w,
+          h: size.h,
+        };
+        return [...prev, bubble];
       });
       setSelectedMessageId(null);
     },
@@ -991,26 +1041,8 @@ export function OrbitProvider({
 
     const historySource = [...(current.messages ?? []), userMsg];
     void (async () => {
-      const history = historySource
-        .filter(
-          (m) =>
-            m.role === "user" ||
-            m.role === "assistant" ||
-            m.role === "system",
-        )
-        .slice(-8)
-        .map((m) => {
-          const role = (
-            m.role === "merge" ? "assistant" : m.role
-          ) as "system" | "user" | "assistant";
-          let body = m.content;
-          if (role === "system" && body.length > 280) {
-            body = `${body.slice(0, 280)}…`;
-          } else if (body.length > 1200) {
-            body = `${body.slice(0, 1200)}…`;
-          }
-          return { role, content: body };
-        });
+      // Keep the parent-context seed (first system message) plus recent turns.
+      const history = selectBubbleSendHistory(historySource);
 
       let assembled = "";
       let failed = false;
@@ -1184,6 +1216,10 @@ export function OrbitProvider({
       const block = [
         "─── Pulled from orbit ───",
         `Bubble: ${b.title}`,
+        b.parentTitle ? `Ejected from: ${b.parentTitle}` : null,
+        b.sourceExcerpt
+          ? `Source ${b.sourceRole}: ${b.sourceExcerpt}`
+          : null,
         b.notes.trim() ? `Notes: ${b.notes.trim()}` : null,
         "Source finding:",
         b.sourceContent,
@@ -1193,15 +1229,24 @@ export function OrbitProvider({
       ]
         .filter(Boolean)
         .join("\n");
-      setMessages((msgs) => [
-        ...msgs,
-        {
-          id: uid("merge"),
-          role: "merge",
-          content: block,
-          createdAt: Date.now(),
-        },
-      ]);
+      const mergeMsg: CoreMessage = {
+        id: uid("merge"),
+        role: "merge",
+        content: block,
+        createdAt: Date.now(),
+      };
+      const parent =
+        b.parentId ? prev.find((x) => x.id === b.parentId) : undefined;
+      if (parent) {
+        return prev
+          .map((x) =>
+            x.id === parent.id
+              ? { ...x, messages: [...(x.messages ?? []), mergeMsg] }
+              : x,
+          )
+          .filter((x) => x.id !== id);
+      }
+      setMessages((msgs) => [...msgs, mergeMsg]);
       return prev.filter((x) => x.id !== id);
     });
   }, []);
