@@ -554,10 +554,9 @@ export function OrbitProvider({
     credentialsRef.current = credentials;
   }, [credentials]);
 
-  useEffect(() => {
-    messagesRef.current = messages;
-    bubblesRef.current = bubbles;
-  }, [messages]);
+  // Keep refs in sync during render so eject-then-type does not see a stale bubble list.
+  messagesRef.current = messages;
+  bubblesRef.current = bubbles;
 
   useEffect(() => {
     setReady(false);
